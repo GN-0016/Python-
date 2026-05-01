@@ -1,0 +1,137 @@
+mkdir -p app scripts
+
+touch app/__init__.py
+
+cat > app/config.py << 'EOF'
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+class Settings:
+    OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+    GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+    GITHUB_REPO = os.getenv("GITHUB_REPO")
+
+settings = Settings()
+EOF
+
+cat > app/github_client.py << 'EOF'
+import requests
+from app.config import settings
+
+BASE_URL = "https://api.github.com"
+
+headers = {
+    "Authorization": f"Bearer {settings.GITHUB_TOKEN}",
+    "Accept": "application/vnd.github+json"
+}
+
+def get_changed_files(pr_number):
+    url = f"{BASE_URL}/repos/{settings.GITHUB_REPO}/pulls/{pr_number}/files"
+    res = requests.get(url, headers=headers)
+    res.raise_for_status()
+    return res.json()
+
+def comment_pr(pr_number, comment):
+    url = f"{BASE_URL}/repos/{settings.GITHUB_REPO}/issues/{pr_number}/comments"
+    res = requests.post(url, headers=headers, json={"body": comment})
+    res.raise_for_status()
+    return res.json()
+EOF
+
+cat > app/llm.py << 'EOF'
+from openai import OpenAI
+from app.config import settings
+
+client = OpenAI(api_key=settings.OPENAI_API_KEY)
+
+def ask_llm(prompt):
+    res = client.chat.completions.create(
+        model="gpt-4.1-mini",
+        messages=[
+            {"role": "system", "content": "You are a senior code reviewer."},
+            {"role": "user", "content": prompt}
+        ],
+        temperature=0.3
+    )
+    return res.choices[0].message.content
+EOF
+
+cat > app/reviewer.py << 'EOF'
+from app.llm import ask_llm
+
+def review_code(diff):
+    return ask_llm(f"Review this code diff:\\n{diff}")
+EOF
+
+cat > app/optimizer.py << 'EOF'
+from app.llm import ask_llm
+
+def optimize_code(diff):
+    return ask_llm(f"Optimize this code:\\n{diff}")
+EOF
+
+cat > app/agent.py << 'EOF'
+from app.github_client import get_changed_files, comment_pr
+from app.reviewer import review_code
+from app.optimizer import optimize_code
+
+def run_agent(pr_number: int):
+    files = get_changed_files(pr_number)
+
+    diff = ""
+    for f in files:
+        diff += f"\\nFile: {f['filename']}\\n{f.get('patch','')}\\n"
+
+    review = review_code(diff)
+    opt = optimize_code(diff)
+
+    comment = f"## AI Review\\n\\n{review}\\n\\n---\\n\\n{opt}"
+    comment_pr(pr_number, comment)
+    return comment
+EOF
+
+cat > app/main.py << 'EOF'
+from fastapi import FastAPI
+from pydantic import BaseModel
+from app.agent import run_agent
+
+app = FastAPI()
+
+class Req(BaseModel):
+    pr_number: int
+
+@app.post("/analyze")
+def analyze(req: Req):
+    return {"result": run_agent(req.pr_number)}
+EOF
+
+cat > requirements.txt << 'EOF'
+fastapi
+uvicorn
+requests
+python-dotenv
+openai
+EOF
+
+cat > .env.example << 'EOF'
+OPENAI_API_KEY=your_key
+GITHUB_TOKEN=your_token
+GITHUB_REPO=owner/repo
+EOF
+
+cat > scripts/run_local.sh << 'EOF'
+#!/bin/bash
+export $(cat .env | xargs)
+uvicorn app.main:app --reload
+EOF
+
+cat > README.md << 'EOF'
+# AI PR Agent
+
+Run:
+
+cp .env.example .env
+bash scripts/run_local.sh
+EOF
